@@ -6,3 +6,4 @@ services:
     # --include=dev: the build needs TypeScript and Vite, which are devDependencies.
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
+    healthCheckPath: /health

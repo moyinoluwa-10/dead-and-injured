@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { NUMBER_LENGTH, isValidNumber, randomNumber } from "../../../shared/game";
 import type { GameView } from "../../../shared/protocol";
+import { useCountdown } from "../useGameEffects";
 import { DigitInput, emptyDigits, toDigits } from "./DigitInput";
+import { DigitNotes } from "./DigitNotes";
 import { GuessHistory } from "./GuessHistory";
 
 interface Props {
@@ -56,6 +58,7 @@ function SetupPanel({ game, onReady }: Pick<Props, "game" | "onReady">) {
 
 function PlayPanel({ game, onGuess }: Pick<Props, "game" | "onGuess">) {
   const [digits, setDigits] = useState(emptyDigits);
+  const seconds = useCountdown(game.turnMsLeft);
   const value = digits.join("");
   const valid = isValidNumber(value);
   const complete = value.length === NUMBER_LENGTH;
@@ -68,12 +71,25 @@ function PlayPanel({ game, onGuess }: Pick<Props, "game" | "onGuess">) {
 
   return (
     <div className="space-y-4 text-center">
-      <p
-        className={`text-lg font-semibold ${game.yourTurn ? "text-amber-300" : "text-slate-400"}`}
-        aria-live="polite"
-      >
-        {game.yourTurn ? "Your turn" : `${game.opponent.username}'s turn`}
-      </p>
+      <div className="flex items-center justify-center gap-3">
+        <p
+          className={`text-lg font-semibold ${game.yourTurn ? "text-amber-300" : "text-slate-400"}`}
+          aria-live="polite"
+        >
+          {game.yourTurn ? "Your turn" : `${game.opponent.username}'s turn`}
+        </p>
+        {seconds !== null && (
+          <span
+            className={`rounded-full px-2.5 py-0.5 font-mono text-sm ${
+              seconds <= 10 ? "bg-rose-500/20 text-rose-300" : "bg-slate-800 text-slate-300"
+            }`}
+            role="timer"
+            aria-label={`${seconds} seconds left`}
+          >
+            {seconds}s
+          </span>
+        )}
+      </div>
       <DigitInput
         label="Your guess"
         value={digits}
@@ -88,32 +104,48 @@ function PlayPanel({ game, onGuess }: Pick<Props, "game" | "onGuess">) {
       <button type="button" disabled={!game.yourTurn || !valid} className={primaryBtn} onClick={submit}>
         {game.yourTurn ? "Guess!" : "Wait!"}
       </button>
+      <DigitNotes />
     </div>
   );
 }
 
 function FinishedPanel({ game, onRematch, onLeave }: Pick<Props, "game" | "onRematch" | "onLeave">) {
   const won = game.winner === "you";
+  const name = game.opponent.username;
+  const reason =
+    game.endReason === "timeout"
+      ? won
+        ? `${name} ran out of time.`
+        : "You ran out of time."
+      : won
+        ? `You cracked ${name}'s number.`
+        : `${name} cracked your number.`;
+
   return (
     <div className="space-y-4 text-center">
       <p className={`text-3xl font-extrabold ${won ? "text-emerald-400" : "text-rose-400"}`}>
         {won ? "You win!" : "You lose!"}
       </p>
-      <p className="text-slate-300">
-        {won
-          ? `You cracked ${game.opponent.username}'s number.`
-          : `${game.opponent.username} cracked your number.`}
-      </p>
+      <p className="text-slate-300">{reason}</p>
+      {game.revealed && (
+        <p className="text-sm text-slate-400">
+          Your number{" "}
+          <span className="font-mono text-base tracking-widest text-white">{game.revealed.yours}</span>
+          {" · "}
+          {name}'s number{" "}
+          <span className="font-mono text-base tracking-widest text-white">{game.revealed.opponents}</span>
+        </p>
+      )}
       <div className="flex justify-center gap-3">
         <button type="button" className={secondaryBtn} onClick={onLeave}>
           Back to lobby
         </button>
         <button type="button" disabled={game.youWantRematch} className={primaryBtn} onClick={onRematch}>
-          {game.youWantRematch ? "Waiting for opponent…" : "Rematch"}
+          {game.youWantRematch && !game.vsComputer ? "Waiting for opponent…" : "Rematch"}
         </button>
       </div>
       {game.opponentWantsRematch && !game.youWantRematch && (
-        <p className="text-sm text-amber-300">{game.opponent.username} wants a rematch.</p>
+        <p className="text-sm text-amber-300">{name} wants a rematch.</p>
       )}
     </div>
   );
@@ -128,11 +160,18 @@ export function GameScreen({ game, username, onReady, onGuess, onRematch, onLeav
     onReady(secret);
   };
 
+  const played = game.yourWins + game.opponentWins > 0;
+
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6">
       <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3">
         <p className="font-semibold">
           {username} <span className="text-slate-500">vs</span> {game.opponent.username}
+          {played && (
+            <span className="ml-3 rounded-full bg-slate-800 px-2.5 py-0.5 font-mono text-sm text-slate-300">
+              {game.yourWins} – {game.opponentWins}
+            </span>
+          )}
         </p>
         {game.phase !== "finished" && (
           <button type="button" className="text-sm text-slate-400 hover:text-white" onClick={onLeave}>
@@ -141,7 +180,13 @@ export function GameScreen({ game, username, onReady, onGuess, onRematch, onLeav
         )}
       </div>
 
-      {game.youReady && mySecret && (
+      {!game.opponentConnected && (
+        <p role="status" className="rounded-lg bg-amber-400/10 px-4 py-2 text-center text-sm text-amber-300">
+          {game.opponent.username} lost their connection. Waiting for them to come back…
+        </p>
+      )}
+
+      {game.youReady && mySecret && game.phase !== "finished" && (
         <p className="text-center text-sm text-slate-400">
           Your number: <span className="font-mono text-lg tracking-widest text-white">{mySecret}</span>
         </p>

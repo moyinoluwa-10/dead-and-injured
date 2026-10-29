@@ -1,22 +1,60 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChallengeDialog } from "./components/ChallengeDialog";
 import { GameScreen } from "./components/GameScreen";
+import { HowToPlay } from "./components/HowToPlay";
 import { Lobby } from "./components/Lobby";
 import { UsernameForm } from "./components/UsernameForm";
+import { useTurnAlerts } from "./useGameEffects";
 import { useSession } from "./useSession";
 
-const STORAGE_KEY = "username";
+const USERNAME_KEY = "username";
+const MUTED_KEY = "muted";
+const SEEN_RULES_KEY = "seen-rules";
 
-function readStoredUsername(): string {
+function readStorage(key: string): string {
   try {
-    return localStorage.getItem(STORAGE_KEY)?.trim() ?? "";
+    return localStorage.getItem(key) ?? "";
   } catch {
     return "";
   }
 }
 
-function Session({ username, onChangeName }: { username: string; onChangeName: () => void }) {
-  const { connected, myStatus, others, incoming, game, notice, actions } = useSession(username);
+function writeStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable (private mode); the preference just won't be remembered.
+  }
+}
+
+function Session({
+  username,
+  onChangeName,
+  inviteCode,
+}: {
+  username: string;
+  onChangeName: () => void;
+  /** Room code from an invite link, joined once connected. */
+  inviteCode: React.RefObject<string | null>;
+}) {
+  const {
+    connected,
+    myStatus,
+    others,
+    incoming,
+    game,
+    roomCode,
+    notice,
+    actions,
+  } = useSession(username);
+  const [muted, setMuted] = useState(() => readStorage(MUTED_KEY) === "1");
+  const [showRules, setShowRules] = useState(
+    () => readStorage(SEEN_RULES_KEY) !== "1",
+  );
+  const everConnected = useRef(false);
+  if (connected) everConnected.current = true;
+
+  useTurnAlerts(game?.yourTurn ?? false, muted);
 
   useEffect(() => {
     if (!notice) return;
@@ -24,19 +62,58 @@ function Session({ username, onChangeName }: { username: string; onChangeName: (
     return () => clearTimeout(timer);
   }, [notice, actions.dismissNotice]);
 
+  // Join the room from an invite link (?room=ABCD) as soon as we're online.
+  useEffect(() => {
+    if (!connected || !inviteCode.current) return;
+    actions.joinRoom(inviteCode.current);
+    inviteCode.current = null;
+    history.replaceState(null, "", location.pathname);
+  }, [connected, inviteCode, actions]);
+
+  const closeRules = () => {
+    writeStorage(SEEN_RULES_KEY, "1");
+    setShowRules(false);
+  };
+
+  const toggleMuted = () => {
+    writeStorage(MUTED_KEY, muted ? "0" : "1");
+    setMuted(!muted);
+  };
+
   return (
     <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4 py-6">
-      <header className="mb-8 flex items-center justify-between">
+      <header className="mb-8 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-extrabold tracking-tight">
           Dead <span className="text-amber-400">&amp;</span> Injured
         </h1>
-        <div className="flex items-center gap-3 text-sm text-slate-400">
+        <div className="flex items-center gap-4 text-sm text-slate-400">
           <span className="flex items-center gap-2">
-            <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-500"}`} />
+            <span
+              className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-500"}`}
+            />
             {username}
           </span>
+          <button
+            type="button"
+            className="hover:text-white"
+            onClick={() => setShowRules(true)}
+          >
+            How to play
+          </button>
+          <button
+            type="button"
+            className="hover:text-white"
+            aria-pressed={muted}
+            onClick={toggleMuted}
+          >
+            {muted ? "Sound off" : "Sound on"}
+          </button>
           {!game && (
-            <button type="button" className="hover:text-white" onClick={onChangeName}>
+            <button
+              type="button"
+              className="hover:text-white"
+              onClick={onChangeName}
+            >
               Change name
             </button>
           )}
@@ -52,10 +129,17 @@ function Session({ username, onChangeName }: { username: string; onChangeName: (
         </div>
       )}
 
+      {!connected && everConnected.current && (
+        <p
+          role="status"
+          className="mb-4 rounded-lg bg-rose-500/10 px-4 py-2 text-center text-sm text-rose-300"
+        >
+          Connection lost. Reconnecting…
+        </p>
+      )}
+
       <main className="flex-1">
-        {!connected ? (
-          <p className="mt-16 text-center text-slate-400">Connecting to the server…</p>
-        ) : game ? (
+        {game ? (
           <GameScreen
             game={game}
             username={username}
@@ -64,20 +148,42 @@ function Session({ username, onChangeName }: { username: string; onChangeName: (
             onRematch={actions.rematch}
             onLeave={actions.leave}
           />
+        ) : !connected && !everConnected.current ? (
+          <p className="mt-16 text-center text-slate-400">
+            Connecting to the server…
+          </p>
         ) : (
-          <Lobby players={others} myStatus={myStatus} onChallenge={actions.challenge} />
+          <Lobby
+            players={others}
+            myStatus={myStatus}
+            roomCode={roomCode}
+            onChallenge={actions.challenge}
+            onPlayComputer={actions.playComputer}
+            onCreateRoom={actions.createRoom}
+            onCancelRoom={actions.cancelRoom}
+            onJoinRoom={actions.joinRoom}
+          />
         )}
       </main>
 
-      {incoming[0] && !game && <ChallengeDialog challenger={incoming[0]} onRespond={actions.respond} />}
+      {incoming[0] && !game && !showRules && (
+        <ChallengeDialog challenger={incoming[0]} onRespond={actions.respond} />
+      )}
+      {showRules && <HowToPlay onClose={closeRules} />}
 
       <footer className="mt-12 text-center text-sm text-slate-500">
         Made with ♥ by{" "}
-        <a className="underline hover:text-slate-300" href="https://twitter.com/t3ch_spawn">
+        <a
+          className="underline hover:text-slate-300"
+          href="https://twitter.com/t3ch_spawn"
+        >
           Boluwatife
         </a>{" "}
         and{" "}
-        <a className="underline hover:text-slate-300" href="https://twitter.com/rotii_mii">
+        <a
+          className="underline hover:text-slate-300"
+          href="https://twitter.com/moyinadelowo"
+        >
           Moyinoluwa
         </a>
       </footer>
@@ -86,17 +192,26 @@ function Session({ username, onChangeName }: { username: string; onChangeName: (
 }
 
 export default function App() {
-  const [username, setUsername] = useState(readStoredUsername);
+  const [username, setUsername] = useState(() =>
+    readStorage(USERNAME_KEY).trim(),
+  );
+  const inviteCode = useRef<string | null>(
+    new URLSearchParams(location.search).get("room"),
+  );
 
   const save = (name: string) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, name);
-    } catch {
-      // Storage can be unavailable (private mode); the name just won't be remembered.
-    }
+    writeStorage(USERNAME_KEY, name);
     setUsername(name);
   };
 
   if (!username) return <UsernameForm onSubmit={save} />;
-  return <Session key={username} username={username} onChangeName={() => save("")} />;
+  return (
+    <Session
+      key={username}
+      username={username}
+      onChangeName={() => save("")}
+      inviteCode={inviteCode}
+    />
+  );
 }
+
