@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { GameView } from "../../shared/protocol";
 
 const BASE_TITLE = "Dead and Injured";
 
@@ -45,9 +46,14 @@ export function useTurnAlerts(yourTurn: boolean, muted: boolean) {
   }, [yourTurn]);
 }
 
-/** Whole seconds left, counting down locally from the server's remaining-time snapshot. */
-export function useCountdown(msLeft: number | null): number | null {
+/**
+ * Whole seconds left, counting down locally from the server's remaining-time snapshot.
+ * Restarts on every new game state, not just when the number changes: each turn starts
+ * with the same full time, so comparing values would miss the reset.
+ */
+export function useCountdown(view: GameView): number | null {
   const [seconds, setSeconds] = useState<number | null>(null);
+  const msLeft = view.turnMsLeft;
 
   useEffect(() => {
     if (msLeft === null) {
@@ -59,7 +65,8 @@ export function useCountdown(msLeft: number | null): number | null {
     tick();
     const timer = setInterval(tick, 250);
     return () => clearInterval(timer);
-  }, [msLeft]);
+    // `view` is a new object for every state the server sends.
+  }, [view, msLeft]);
 
   return seconds;
 }

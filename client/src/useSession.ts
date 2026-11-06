@@ -106,6 +106,7 @@ export function useSession(username: string) {
         emit("challenge:respond", id, accept);
         setIncoming((list) => list.filter((c) => c.id !== id));
       },
+      cancelChallenge: () => emit("challenge:cancel"),
       createRoom: () => emit("room:create"),
       cancelRoom: () => emit("room:cancel"),
       joinRoom: (code: string) => emit("room:join", code),

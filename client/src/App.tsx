@@ -158,6 +158,7 @@ function Session({
             myStatus={myStatus}
             roomCode={roomCode}
             onChallenge={actions.challenge}
+            onCancelChallenge={actions.cancelChallenge}
             onPlayComputer={actions.playComputer}
             onCreateRoom={actions.createRoom}
             onCancelRoom={actions.cancelRoom}

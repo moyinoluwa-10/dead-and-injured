@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Leaderboard } from "./Leaderboard";
 import { ROOM_CODE_LENGTH, type PlayerInfo, type PlayerStatus } from "../../../shared/protocol";
 
@@ -7,6 +7,7 @@ interface Props {
   myStatus: PlayerStatus;
   roomCode: string | null;
   onChallenge: (id: string) => void;
+  onCancelChallenge: () => void;
   onPlayComputer: () => void;
   onCreateRoom: () => void;
   onCancelRoom: () => void;
@@ -66,13 +67,21 @@ export function Lobby({
   myStatus,
   roomCode,
   onChallenge,
+  onCancelChallenge,
   onPlayComputer,
   onCreateRoom,
   onCancelRoom,
   onJoinRoom,
 }: Props) {
   const [code, setCode] = useState("");
-  const iAmFree = myStatus === "available";
+  // Right after a game, "Back to lobby" sits where lobby buttons appear, so a
+  // double-click would otherwise land on one (and challenge someone by accident).
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(true), 800);
+    return () => clearTimeout(timer);
+  }, []);
+  const iAmFree = myStatus === "available" && settled;
 
   return (
     <section className="mx-auto w-full max-w-md space-y-8">
@@ -126,11 +135,16 @@ export function Lobby({
 
       <div>
         <h2 className="mb-1 text-xl font-bold">Players online</h2>
-        <p className="mb-4 text-sm text-slate-400">
-          {myStatus === "pending"
-            ? "Waiting for your opponent to answer…"
-            : "Pick someone to challenge to a game."}
-        </p>
+        {myStatus === "pending" ? (
+          <div className="mb-4 flex items-center justify-between gap-3 rounded-lg bg-amber-400/10 px-4 py-2 text-sm text-amber-300">
+            <span>Waiting for your opponent to answer…</span>
+            <button type="button" className={secondaryBtn} onClick={onCancelChallenge}>
+              Cancel challenge
+            </button>
+          </div>
+        ) : (
+          <p className="mb-4 text-sm text-slate-400">Pick someone to challenge to a game.</p>
+        )}
 
         {players.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center text-slate-400">

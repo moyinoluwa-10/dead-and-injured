@@ -58,7 +58,7 @@ function SetupPanel({ game, onReady }: Pick<Props, "game" | "onReady">) {
 
 function PlayPanel({ game, onGuess }: Pick<Props, "game" | "onGuess">) {
   const [digits, setDigits] = useState(emptyDigits);
-  const seconds = useCountdown(game.turnMsLeft);
+  const seconds = useCountdown(game);
   const value = digits.join("");
   const valid = isValidNumber(value);
   const complete = value.length === NUMBER_LENGTH;

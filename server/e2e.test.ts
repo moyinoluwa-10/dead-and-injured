@@ -436,4 +436,84 @@ describe("game server", () => {
     assert.equal(res.status, 503);
     await store.close();
   });
+
+  test("nobody is left with a pending challenge after a game, whoever leaves first", async () => {
+    for (const order of ["a-first", "b-first", "both-at-once"] as const) {
+      await start();
+      const { a, b } = await pair();
+      const { first, second, secretOf } = await readyUp(a, b);
+      first.socket.emit("game:guess", secretOf(second));
+      await waitFor(() => a.state!.phase === "finished", "finished");
+
+      if (order === "a-first") a.socket.emit("game:leave");
+      else if (order === "b-first") b.socket.emit("game:leave");
+      else {
+        a.socket.emit("game:leave");
+        b.socket.emit("game:leave");
+      }
+      await waitFor(
+        () => a.lobby.find((p) => p.id === a.id)?.status === "available" &&
+          b.lobby.find((p) => p.id === b.id)?.status === "available",
+        `both available (${order})`
+      );
+      // the only challenge ever sent is the one that started the game
+      const received = (c: TestClient) => c.events.filter(([n]) => n === "challenge:received").length;
+      assert.equal(received(a), 0);
+      assert.equal(received(b), 1);
+      assert.ok(a.lobby.every((p) => p.status === "available"));
+      assert.ok(b.lobby.every((p) => p.status === "available"));
+
+      // the shared afterEach cleans up the last round
+      if (order !== "both-at-once") {
+        for (const c of clients) c.socket.close();
+        clients = [];
+        await game.close();
+      }
+    }
+  });
+
+  test("a challenge nobody answers expires, and the challenger can cancel it", async () => {
+    await start({ challengeTimeoutMs: 200 });
+    const a = await connect("alice");
+    const b = await connect("bob");
+    await waitFor(() => a.lobby.length === 2, "lobby");
+
+    // expires on its own
+    a.socket.emit("challenge:send", b.id);
+    await waitFor(() => b.last("challenge:received") !== undefined, "challenge");
+    await waitFor(() => b.last("challenge:cancelled") === a.id, "target told it expired");
+    await waitFor(() => a.last("error") === "bob didn't answer your challenge", "challenger told");
+    await waitFor(() => a.lobby.find((p) => p.id === a.id)?.status === "available", "challenger freed");
+
+    // cancelled by the challenger
+    const before = b.events.filter(([n]) => n === "challenge:cancelled").length;
+    a.socket.emit("challenge:send", b.id);
+    await waitFor(() => a.lobby.find((p) => p.id === a.id)?.status === "pending", "pending");
+    a.socket.emit("challenge:cancel");
+    await waitFor(() => b.events.filter(([n]) => n === "challenge:cancelled").length > before, "target told");
+    await waitFor(() => a.lobby.find((p) => p.id === a.id)?.status === "available", "challenger freed again");
+
+    // an accepted challenge doesn't leave a timer behind that cancels the game
+    a.socket.emit("challenge:send", b.id);
+    await waitFor(() => b.last("challenge:received") !== undefined, "challenge 3");
+    b.socket.emit("challenge:respond", a.id, true);
+    await waitFor(() => a.state !== null, "game");
+    await sleep(400);
+    assert.notEqual(a.state, null);
+    assert.equal(a.last("error"), "bob didn't answer your challenge", "no new expiry error");
+  });
+
+  test("challengers are told when the player they challenged starts something else", async () => {
+    await start();
+    const a = await connect("alice");
+    const b = await connect("bob");
+    await waitFor(() => a.lobby.length === 2, "lobby");
+
+    a.socket.emit("challenge:send", b.id);
+    await waitFor(() => b.last("challenge:received") !== undefined, "challenge");
+    b.socket.emit("bot:start");
+    await waitFor(() => b.state !== null, "bob playing the computer");
+    await waitFor(() => a.last("challenge:declined") !== undefined, "alice told");
+    await waitFor(() => a.lobby.find((p) => p.id === a.id)?.status === "available", "alice freed");
+  });
 });

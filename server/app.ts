@@ -29,6 +29,8 @@ export interface ServerOptions {
   reconnectGraceMs: number;
   /** Range of the computer opponent's "thinking" delay. */
   botDelayMs: [number, number];
+  /** How long a challenge waits for an answer before it expires. */
+  challengeTimeoutMs: number;
   maxPlayers: number;
   /** Max events per socket in any 10 second window. */
   maxEventsPerWindow: number;
@@ -41,6 +43,7 @@ export const defaultOptions: ServerOptions = {
   turnMs: 60_000,
   reconnectGraceMs: 45_000,
   botDelayMs: [700, 1600],
+  challengeTimeoutMs: 30_000,
   maxPlayers: 200,
   maxEventsPerWindow: 80,
   clientDir: path.resolve(process.cwd(), "client/dist"),
@@ -62,6 +65,8 @@ interface Player {
   matchId: string | null;
   /** Id of the player this player has challenged, if any. */
   challenging: string | null;
+  /** Expires the outstanding challenge if nobody answers. */
+  challengeTimer: NodeJS.Timeout | null;
   /** Code of the private room this player is hosting, if any. */
   roomCode: string | null;
   graceTimer: NodeJS.Timeout | null;
@@ -216,6 +221,10 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
   }
 
   function startMatch(a: Player, b: Player | Bot) {
+    // Anyone who challenged these players, or was challenged by them, is told it's off.
+    clearChallenges(a.id, a);
+    if ("socketId" in b) clearChallenges(b.id, b);
+
     const match = new Match(String(nextMatchId++), [a.id, b.id], {
       turnMs: opts.turnMs,
       onFinish: (r) => recordRound(r, bots.has(match.id)),
@@ -252,11 +261,29 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
 
   // ---- challenges and rooms ----------------------------------------------
 
+  function endChallenge(p: Player) {
+    clearTimeout(p.challengeTimer ?? undefined);
+    p.challengeTimer = null;
+    p.challenging = null;
+  }
+
+  /** `challenger` challenges `target`; the challenge expires if it goes unanswered. */
+  function startChallenge(challenger: Player, target: Player) {
+    challenger.challenging = target.id;
+    challenger.challengeTimer = setTimeout(() => {
+      if (challenger.challenging !== target.id) return;
+      endChallenge(challenger);
+      emitTo(target.id).emit("challenge:cancelled", challenger.id);
+      emitTo(challenger.id).emit("error", `${target.username} didn't answer your challenge`);
+      broadcastLobby();
+    }, opts.challengeTimeoutMs);
+  }
+
   /** Cancel every challenge that involves `playerId`, as sender or as target. */
   function clearChallenges(playerId: string, notifyDeclinedBy?: Player) {
     for (const p of players.values()) {
       if (p.challenging === playerId) {
-        p.challenging = null;
+        endChallenge(p);
         if (notifyDeclinedBy) {
           emitTo(p.id).emit("challenge:declined", {
             id: notifyDeclinedBy.id,
@@ -268,7 +295,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     const self = players.get(playerId);
     if (self?.challenging) {
       emitTo(self.challenging).emit("challenge:cancelled", playerId);
-      self.challenging = null;
+      endChallenge(self);
     }
   }
 
@@ -348,6 +375,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
         socketId: socket.id,
         matchId: null,
         challenging: null,
+        challengeTimer: null,
         roomCode: null,
         graceTimer: null,
       };
@@ -380,8 +408,16 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
         return socket.emit("error", `${target.username} is busy right now`);
       }
 
-      self.challenging = target.id;
+      startChallenge(self, target);
       emitTo(target.id).emit("challenge:received", { id: self.id, username: self.username });
+      broadcastLobby();
+    });
+
+    socket.on("challenge:cancel", () => {
+      const targetId = self.challenging;
+      if (!targetId) return;
+      endChallenge(self);
+      emitTo(targetId).emit("challenge:cancelled", self.id);
       broadcastLobby();
     });
 
@@ -394,7 +430,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       if (!challenger || challenger.challenging !== self.id) return;
 
       if (!accept || self.matchId || self.roomCode) {
-        challenger.challenging = null;
+        endChallenge(challenger);
         emitTo(challenger.id).emit("challenge:declined", {
           id: self.id,
           username: self.username,
@@ -402,10 +438,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
         return broadcastLobby();
       }
 
-      challenger.challenging = null;
-      // Anyone else who challenged either player, or was challenged by them, is out of luck.
-      clearChallenges(self.id, self);
-      clearChallenges(challenger.id, challenger);
+      endChallenge(challenger);
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,6 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
 
       rooms.delete(host.roomCode!);
       host.roomCode = null;
-      clearChallenges(host.id, host);
       startMatch(host, self);
     });
 
@@ -499,7 +531,10 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     async close() {
       for (const t of turnTimers.values()) clearTimeout(t);
       for (const b of bots.values()) clearTimeout(b.timer ?? undefined);
-      for (const p of players.values()) clearTimeout(p.graceTimer ?? undefined);
+      for (const p of players.values()) {
+        clearTimeout(p.graceTimer ?? undefined);
+        clearTimeout(p.challengeTimer ?? undefined);
+      }
       await io.close();
     },
   };

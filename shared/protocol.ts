@@ -43,6 +43,7 @@ export interface GameView {
 export interface ClientToServerEvents {
   "challenge:send": (targetId: string) => void;
   "challenge:respond": (fromId: string, accept: boolean) => void;
+  "challenge:cancel": () => void;
   "room:create": () => void;
   "room:cancel": () => void;
   "room:join": (code: string) => void;
