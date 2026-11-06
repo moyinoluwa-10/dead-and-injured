@@ -9,9 +9,10 @@ import type {
   PlayerInfo,
   ServerToClientEvents,
 } from "../shared/protocol";
-import { ROOM_CODE_LENGTH } from "../shared/protocol";
+import { MAX_USERNAME_LENGTH, ROOM_CODE_LENGTH } from "../shared/protocol";
 import { Solver } from "../shared/solver";
 import { Match, type RoundResult } from "./match";
+import { isPrivateAddress, safely, uniqueName } from "./safety";
 import type { Store } from "./store";
 import {
   authSchema,
@@ -32,6 +33,15 @@ export interface ServerOptions {
   /** How long a challenge waits for an answer before it expires. */
   challengeTimeoutMs: number;
   maxPlayers: number;
+  /** Max simultaneous connections from one client address. */
+  maxConnectionsPerIp: number;
+  /**
+   * Name of a request header that carries the real client address, such as
+   * "x-forwarded-for" (first value is used). Only set this to a header your host
+   * sets itself: a client could otherwise forge it. Without it, addresses are
+   * only used when they are public, i.e. when the server is not behind a proxy.
+   */
+  clientIpHeader?: string;
   /** Max events per socket in any 10 second window. */
   maxEventsPerWindow: number;
   clientDir: string;
@@ -45,6 +55,7 @@ export const defaultOptions: ServerOptions = {
   botDelayMs: [700, 1600],
   challengeTimeoutMs: 30_000,
   maxPlayers: 200,
+  maxConnectionsPerIp: 10,
   maxEventsPerWindow: 80,
   clientDir: path.resolve(process.cwd(), "client/dist"),
 };
@@ -52,6 +63,8 @@ export const defaultOptions: ServerOptions = {
 interface SocketData {
   username: string;
   token: string;
+  /** Client address used for the per-address connection limit, if one could be determined. */
+  ip: string | null;
 }
 
 interface Player {
@@ -168,10 +181,13 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
 
     turnTimers.set(
       match.id,
-      setTimeout(() => {
-        turnTimers.delete(match.id);
-        if (matches.get(match.id) === match && match.expireTurn()) afterChange(match);
-      }, left)
+      setTimeout(
+        safely("turn timer", () => {
+          turnTimers.delete(match.id);
+          if (matches.get(match.id) === match && match.expireTurn()) afterChange(match);
+        }),
+        left
+      )
     );
   }
 
@@ -186,15 +202,18 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     if (match.phase !== "playing" || match.currentTurn !== bot.id) return;
 
     const [min, max] = opts.botDelayMs;
-    bot.timer = setTimeout(() => {
-      bot.timer = null;
-      if (matches.get(match.id) !== match) return;
-      const guess = bot.solver.next();
-      if (match.guess(bot.id, guess) !== null) return;
-      const result = match.lastGuess(bot.id)!;
-      bot.solver.observe(guess, result);
-      afterChange(match);
-    }, min + Math.random() * (max - min));
+    bot.timer = setTimeout(
+      safely("computer move", () => {
+        bot.timer = null;
+        if (matches.get(match.id) !== match) return;
+        const guess = bot.solver.next();
+        if (match.guess(bot.id, guess) !== null) return;
+        const result = match.lastGuess(bot.id)!;
+        bot.solver.observe(guess, result);
+        afterChange(match);
+      }),
+      min + Math.random() * (max - min)
+    );
   }
 
   /** Call after any change to a match: pushes state, restarts the turn clock, lets the computer move. */
@@ -208,16 +227,18 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
 
   /** Fire and forget: a database problem must never interrupt a game. */
   function recordRound(r: RoundResult, vsComputer: boolean) {
-    opts.store
-      ?.recordRound({
+    const store = opts.store;
+    if (!store) return;
+    // The async wrapper turns a synchronous throw from the store into a rejection too.
+    void (async () =>
+      store.recordRound({
         winner: nameOf(r.winnerId),
         loser: nameOf(r.loserId),
         reason: r.reason,
         winnerGuesses: r.winnerGuesses,
         loserGuesses: r.loserGuesses,
         vsComputer,
-      })
-      .catch((err) => console.error("failed to record game", err));
+      }))().catch((err) => console.error("failed to record game", err));
   }
 
   function startMatch(a: Player, b: Player | Bot) {
@@ -270,13 +291,16 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
   /** `challenger` challenges `target`; the challenge expires if it goes unanswered. */
   function startChallenge(challenger: Player, target: Player) {
     challenger.challenging = target.id;
-    challenger.challengeTimer = setTimeout(() => {
-      if (challenger.challenging !== target.id) return;
-      endChallenge(challenger);
-      emitTo(target.id).emit("challenge:cancelled", challenger.id);
-      emitTo(challenger.id).emit("error", `${target.username} didn't answer your challenge`);
-      broadcastLobby();
-    }, opts.challengeTimeoutMs);
+    challenger.challengeTimer = setTimeout(
+      safely("challenge timer", () => {
+        if (challenger.challenging !== target.id) return;
+        endChallenge(challenger);
+        emitTo(target.id).emit("challenge:cancelled", challenger.id);
+        emitTo(challenger.id).emit("error", `${target.username} didn't answer your challenge`);
+        broadcastLobby();
+      }),
+      opts.challengeTimeoutMs
+    );
   }
 
   /** Cancel every challenge that involves `playerId`, as sender or as target. */
@@ -330,19 +354,48 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
 
   // ---- connections -------------------------------------------------------
 
+  /** The client's address for rate limiting, or null if it can't be told apart from other clients. */
+  function clientIp(socket: { handshake: { address: string; headers: http.IncomingHttpHeaders } }) {
+    if (opts.clientIpHeader) {
+      const raw = socket.handshake.headers[opts.clientIpHeader.toLowerCase()];
+      const first = (Array.isArray(raw) ? raw[0] : raw)?.split(",")[0]?.trim();
+      if (first) return first;
+    }
+    // Behind a proxy every connection arrives from the proxy's private address, which
+    // says nothing about the client, so limiting by it would cap the whole server.
+    const address = socket.handshake.address;
+    return address && !isPrivateAddress(address) ? address : null;
+  }
+
+  const connectionsByIp = new Map<string, number>();
+
   io.use((socket, next) => {
     const auth = parse(authSchema, socket.handshake.auth);
     if (!auth) return next(new Error("Invalid username"));
     if (!byToken.has(auth.token) && players.size >= opts.maxPlayers) {
       return next(new Error("The server is full, try again soon"));
     }
+    const ip = clientIp(socket);
+    if (ip && (connectionsByIp.get(ip) ?? 0) >= opts.maxConnectionsPerIp) {
+      return next(new Error("Too many connections from your network"));
+    }
     socket.data.username = auth.username;
     socket.data.token = auth.token;
+    socket.data.ip = ip;
     next();
   });
 
   io.on("connection", (socket) => {
-    const { username, token } = socket.data;
+    const { username: requestedName, token, ip } = socket.data;
+
+    if (ip) {
+      connectionsByIp.set(ip, (connectionsByIp.get(ip) ?? 0) + 1);
+      socket.on("disconnect", () => {
+        const left = (connectionsByIp.get(ip) ?? 1) - 1;
+        if (left <= 0) connectionsByIp.delete(ip);
+        else connectionsByIp.set(ip, left);
+      });
+    }
 
     // Per-socket rate limit.
     let recent: number[] = [];
@@ -356,6 +409,17 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       recent.push(now);
       next();
     });
+
+    // Two players can't share a name: the second gets "Name (2)". The player's own
+    // existing session doesn't count, so reconnecting keeps the same name.
+    const username = uniqueName(
+      requestedName,
+      (candidate) =>
+        [...players.values()].some(
+          (p) => p.token !== token && p.username.toLowerCase() === candidate.toLowerCase()
+        ),
+      MAX_USERNAME_LENGTH
+    );
 
     let me = byToken.get(token);
     const resumed = me !== undefined;
@@ -384,7 +448,17 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     }
     const self = me;
     socket.join(self.id);
-    socket.emit("session:hello", { playerId: self.id, resumed });
+    socket.emit("session:hello", { playerId: self.id, username: self.username, resumed });
+
+    // Handlers that throw are logged and reported to the player instead of taking the server down.
+    const on = <E extends keyof ClientToServerEvents>(event: E, handler: ClientToServerEvents[E]) => {
+      socket.on(
+        event,
+        safely(event, handler as (...args: unknown[]) => void, () =>
+          socket.emit("error", "Something went wrong, please try again")
+        ) as never
+      );
+    };
 
     if (resumed) {
       // Bring the returning client back up to date.
@@ -399,7 +473,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     }
     broadcastLobby();
 
-    socket.on("challenge:send", (rawTarget) => {
+    on("challenge:send", (rawTarget) => {
       const targetId = parse(idSchema, rawTarget);
       const target = targetId ? players.get(targetId) : undefined;
       if (!target || target.id === self.id || !isOnline(target)) return;
@@ -413,7 +487,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       broadcastLobby();
     });
 
-    socket.on("challenge:cancel", () => {
+    on("challenge:cancel", () => {
       const targetId = self.challenging;
       if (!targetId) return;
       endChallenge(self);
@@ -421,7 +495,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       broadcastLobby();
     });
 
-    socket.on("challenge:respond", (...args) => {
+    on("challenge:respond", (...args) => {
       const parsed = parse(respondSchema, args);
       if (!parsed) return;
       const [fromId, accept] = parsed;
@@ -442,7 +516,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       startMatch(challenger, self);
     });
 
-    socket.on("room:create", () => {
+    on("room:create", () => {
       if (!isAvailable(self)) return socket.emit("error", "Finish what you're doing first");
       self.roomCode = newRoomCode();
       rooms.set(self.roomCode, self.id);
@@ -450,12 +524,12 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       broadcastLobby();
     });
 
-    socket.on("room:cancel", () => {
+    on("room:cancel", () => {
       closeRoom(self);
       broadcastLobby();
     });
 
-    socket.on("room:join", (rawCode) => {
+    on("room:join", (rawCode) => {
       const code = parse(roomCodeSchema, rawCode);
       const host = code ? players.get(rooms.get(code) ?? "") : undefined;
       if (!host || host.roomCode !== code || host.id === self.id || !isOnline(host)) {
@@ -468,12 +542,12 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       startMatch(host, self);
     });
 
-    socket.on("bot:start", () => {
+    on("bot:start", () => {
       if (!isAvailable(self)) return socket.emit("error", "Finish what you're doing first");
       startMatch(self, { id: `bot-${nextBotId++}`, solver: new Solver(), timer: null });
     });
 
-    socket.on("game:ready", (rawSecret) => {
+    on("game:ready", (rawSecret) => {
       const match = matchOf(self);
       const secret = parse(digitsSchema, rawSecret);
       if (!match || secret === undefined) return;
@@ -482,7 +556,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       afterChange(match);
     });
 
-    socket.on("game:guess", (rawGuess) => {
+    on("game:guess", (rawGuess) => {
       const match = matchOf(self);
       const guess = parse(digitsSchema, rawGuess);
       if (!match || guess === undefined) return;
@@ -491,7 +565,7 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       afterChange(match);
     });
 
-    socket.on("game:rematch", () => {
+    on("game:rematch", () => {
       const match = matchOf(self);
       if (!match) return;
       match.requestRematch(self.id);
@@ -500,28 +574,34 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       afterChange(match);
     });
 
-    socket.on("game:leave", () => {
+    on("game:leave", () => {
       const match = matchOf(self);
       if (!match) return;
       endMatch(match, self.id);
       broadcastLobby();
     });
 
-    socket.on("disconnect", () => {
-      // A newer connection has taken over this session; nothing to clean up.
-      if (self.socketId !== socket.id) return;
-      self.socketId = null;
+    socket.on(
+      "disconnect",
+      safely("disconnect", () => {
+        // A newer connection has taken over this session; nothing to clean up.
+        if (self.socketId !== socket.id) return;
+        self.socketId = null;
 
-      const match = matchOf(self);
-      if (match && !bots.has(match.id)) {
-        // Give the player a chance to come back before abandoning the game.
-        self.graceTimer = setTimeout(() => removePlayer(self), opts.reconnectGraceMs);
-        sendGameState(match);
-        broadcastLobby();
-      } else {
-        removePlayer(self);
-      }
-    });
+        const match = matchOf(self);
+        if (match && !bots.has(match.id)) {
+          // Give the player a chance to come back before abandoning the game.
+          self.graceTimer = setTimeout(
+            safely("reconnect timeout", () => removePlayer(self)),
+            opts.reconnectGraceMs
+          );
+          sendGameState(match);
+          broadcastLobby();
+        } else {
+          removePlayer(self);
+        }
+      })
+    );
   });
 
   return {

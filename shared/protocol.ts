@@ -55,8 +55,12 @@ export interface ClientToServerEvents {
 }
 
 export interface ServerToClientEvents {
-  /** Sent on every (re)connection. `resumed` is false when the server did not recognise the session. */
-  "session:hello": (info: { playerId: string; resumed: boolean }) => void;
+  /**
+   * Sent on every (re)connection. `username` is the name the server settled on, which can
+   * differ from the requested one if someone else already has it. `resumed` is false when
+   * the server did not recognise the session.
+   */
+  "session:hello": (info: { playerId: string; username: string; resumed: boolean }) => void;
   "lobby:players": (players: PlayerInfo[]) => void;
   "challenge:received": (from: { id: string; username: string }) => void;
   "challenge:cancelled": (fromId: string) => void;

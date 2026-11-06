@@ -43,18 +43,30 @@ export function useSession(username: string) {
   const [game, setGame] = useState<GameView | null>(null);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** The name the server settled on, which differs from `username` if it was already taken. */
+  const [displayName, setDisplayName] = useState<string | null>(null);
+  /** Why the server turned this connection away (full, too many connections…), if it did. */
+  const [refused, setRefused] = useState<string | null>(null);
 
   useEffect(() => {
     const socket: GameSocket = io({ auth: { username, token: sessionToken() } });
     socketRef.current = socket;
 
-    socket.on("connect", () => setConnected(true));
+    socket.on("connect", () => {
+      setConnected(true);
+      setRefused(null);
+    });
     // Keep the game on screen while the socket reconnects; the server restores it.
     socket.on("disconnect", () => setConnected(false));
-    socket.on("connect_error", (err) => setNotice(err.message));
+    socket.on("connect_error", (err) => {
+      // When the server refuses a connection outright the client does not retry by itself.
+      if (!socket.active) setRefused(err.message);
+      else setNotice(err.message);
+    });
 
-    socket.on("session:hello", ({ playerId, resumed }) => {
+    socket.on("session:hello", ({ playerId, username: assignedName, resumed }) => {
       setMyId(playerId);
+      setDisplayName(assignedName);
       if (!resumed) {
         // The server doesn't know us any more (e.g. it restarted), so local state is stale.
         setGame(null);
@@ -127,6 +139,8 @@ export function useSession(username: string) {
 
   return {
     connected,
+    refused,
+    displayName,
     myStatus: me?.status ?? "available",
     others: players.filter((p) => p.id !== myId && p.status !== "hosting"),
     incoming,

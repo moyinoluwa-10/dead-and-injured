@@ -72,7 +72,17 @@ The game keeps lobby and match state in memory, so run **a single instance**, an
 
 ## Server limits
 
-Defined in `defaultOptions` in [server/app.ts](server/app.ts): 200 players, 80 events per socket per 10 seconds, 10 KB max message size, 60 s per turn, 45 s reconnect grace.
+Defined in `defaultOptions` in [server/app.ts](server/app.ts): 200 players, 10 connections per client address, 80 events per socket per 10 seconds, 10 KB max message size, 60 s per turn, 30 s for a challenge to be answered, 45 s reconnect grace.
+
+**Per-address limit behind a proxy.** Behind a host's proxy (such as Render) every connection can arrive from the proxy's private address, which says nothing about the real client. By default the server then skips the per-address limit rather than capping the whole server. To enable it, set the `CLIENT_IP_HEADER` environment variable to a header your host sets with the client's address, for example `x-forwarded-for` (the first value is used). Only use a header your host sets itself, since a client could forge any other. The server logs which header it is using at startup.
+
+**Names.** Two players can't share a name (compared ignoring case): the second gets a suffix, such as `Don (2)`.
+
+**Errors.** Event handlers and timers are individually guarded: an exception is logged and the player sees a generic error, but the server and other players' games carry on. `unhandledRejection` and `uncaughtException` are logged rather than ending the process, because a restart would drop every game in memory. The React app has an error boundary with a reload button.
+
+## Node version
+
+The app targets Node 22 (`engines` in [package.json](package.json) and [.node-version](.node-version)), which is what Render and CI use.
 
 ## CI
 

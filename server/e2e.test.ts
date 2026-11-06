@@ -19,6 +19,8 @@ interface TestClient {
   socket: ClientSocket;
   token: string;
   id: string;
+  /** The name the server gave this player. */
+  name: string;
   resumed: boolean;
   state: GameView | null;
   lobby: PlayerInfo[];
@@ -63,6 +65,7 @@ describe("game server", () => {
       socket,
       token,
       id: "",
+      name: "",
       resumed: false,
       state: null,
       lobby: [],
@@ -72,6 +75,7 @@ describe("game server", () => {
     };
     socket.on("session:hello", (h) => {
       c.id = h.playerId;
+      c.name = h.username;
       c.resumed = h.resumed;
     });
     socket.on("lobby:players", (p) => (c.lobby = p));
@@ -501,6 +505,101 @@ describe("game server", () => {
     await sleep(400);
     assert.notEqual(a.state, null);
     assert.equal(a.last("error"), "bob didn't answer your challenge", "no new expiry error");
+  });
+
+  test("players never share a name: the second gets a numeric suffix", async () => {
+    await start();
+    const first = await connect("Don");
+    const second = await connect("don");
+    const third = await connect("DON");
+    assert.equal(first.name, "Don");
+    assert.equal(second.name, "don (2)");
+    assert.equal(third.name, "DON (3)");
+    await waitFor(() => first.lobby.length === 3, "lobby");
+    assert.deepEqual(first.lobby.map((p) => p.username).sort(), ["DON (3)", "Don", "don (2)"]);
+
+    // reconnecting keeps the same name rather than bumping it
+    second.socket.disconnect();
+    await waitFor(() => first.lobby.length === 2, "second gone");
+    const back = await connect("don", second.token);
+    assert.equal(back.name, "don (2)");
+
+    // a name is free again once its owner leaves
+    first.socket.close();
+    third.socket.close();
+    await waitFor(() => back.lobby.length === 1, "others gone");
+    const fresh = await connect("Don");
+    assert.equal(fresh.name, "Don");
+
+    // a maximum-length name still fits after the suffix
+    const long = "x".repeat(20);
+    await connect(long);
+    const longer = await connect(long);
+    assert.equal(longer.name.length, 20);
+    assert.ok(longer.name.endsWith(" (2)"));
+  });
+
+  test("limits connections per client address", async () => {
+    await start({ maxConnectionsPerIp: 2, clientIpHeader: "x-test-ip" });
+    const open = (ip: string) =>
+      io(url, {
+        auth: { username: `u${Math.random().toString(36).slice(2, 7)}`, token: crypto.randomUUID() },
+        transports: ["websocket"],
+        reconnection: false,
+        extraHeaders: { "x-test-ip": ip },
+      });
+    const outcome = (s: ClientSocket) =>
+      new Promise<string>((resolve) => {
+        s.on("session:hello", () => resolve("ok"));
+        s.on("connect_error", (e) => resolve(e.message));
+      });
+    const sockets: ClientSocket[] = [];
+    const attempt = async (ip: string) => {
+      const s = open(ip);
+      sockets.push(s);
+      return { s, result: await outcome(s) };
+    };
+
+    const one = await attempt("203.0.113.1");
+    const two = await attempt("203.0.113.1");
+    assert.equal(one.result, "ok");
+    assert.equal(two.result, "ok");
+    assert.equal((await attempt("203.0.113.1")).result, "Too many connections from your network");
+    // another address is unaffected
+    assert.equal((await attempt("203.0.113.2")).result, "ok");
+
+    // closing a connection frees a slot
+    one.s.close();
+    await sleep(100);
+    assert.equal((await attempt("203.0.113.1")).result, "ok");
+    for (const s of sockets) s.close();
+  });
+
+  test("without a trusted client address, private connections are not limited", async () => {
+    // Behind a proxy every client shares the proxy's private address; limiting it would cap the whole server.
+    await start({ maxConnectionsPerIp: 1 });
+    const a = await connect("one");
+    const b = await connect("two");
+    const c = await connect("three");
+    assert.ok(a.id && b.id && c.id);
+  });
+
+  test("a store that throws synchronously cannot interrupt a game", async () => {
+    const store = await createMemoryStore();
+    store.recordRound = () => {
+      throw new Error("sync failure");
+    };
+    await start({ store });
+    const { a, b } = await pair();
+    const { first, second, secretOf } = await readyUp(a, b);
+    first.socket.emit("game:guess", secretOf(second));
+    await waitFor(() => first.state!.phase === "finished" && second.state!.phase === "finished", "both see the end");
+
+    // and the rematch still works afterwards
+    first.socket.emit("game:rematch");
+    second.socket.emit("game:rematch");
+    await waitFor(() => a.state!.phase === "setup" && b.state!.phase === "setup", "rematch");
+    await store.close();
   });
 
   test("challengers are told when the player they challenged starts something else", async () => {

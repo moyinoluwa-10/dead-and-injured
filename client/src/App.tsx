@@ -39,6 +39,8 @@ function Session({
 }) {
   const {
     connected,
+    refused,
+    displayName,
     myStatus,
     others,
     incoming,
@@ -91,7 +93,7 @@ function Session({
             <span
               className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-500"}`}
             />
-            {username}
+            {displayName ?? username}
           </span>
           <button
             type="button"
@@ -142,12 +144,23 @@ function Session({
         {game ? (
           <GameScreen
             game={game}
-            username={username}
+            username={displayName ?? username}
             onReady={actions.ready}
             onGuess={actions.guess}
             onRematch={actions.rematch}
             onLeave={actions.leave}
           />
+        ) : refused && !connected ? (
+          <div role="alert" className="mx-auto mt-16 max-w-sm space-y-4 text-center">
+            <p className="text-slate-300">Couldn't join: {refused}.</p>
+            <button
+              type="button"
+              onClick={() => location.reload()}
+              className="rounded-lg bg-amber-400 px-5 py-2 font-semibold text-slate-950 hover:bg-amber-300"
+            >
+              Try again
+            </button>
+          </div>
         ) : !connected && !everConnected.current ? (
           <p className="mt-16 text-center text-slate-400">
             Connecting to the server…
