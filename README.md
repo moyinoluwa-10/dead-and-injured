@@ -15,10 +15,12 @@ First to get 4 dead wins.
 - Series score across rematches, both numbers revealed at the end
 - Turn alerts (sound, vibration, tab title), a digit notes pad, a how-to-play dialog
 - Installable as a PWA
+- Optional **leaderboard** backed by Postgres (wins and losses between people; games against the computer are not counted)
 
 ## Stack
 
 - **Server**: Node, Express, Socket.io, Zod, TypeScript (`server/`)
+- **Database** (optional): Postgres via Drizzle ORM (`server/store.ts`)
 - **Client**: React, Vite, Tailwind CSS v4, TypeScript (`client/`)
 - **Shared**: game rules, the computer's solver and the typed socket protocol, used by both sides (`shared/`)
 
@@ -39,6 +41,20 @@ npm run typecheck
 
 Open http://localhost:5173 in two tabs to play against yourself.
 
+## Database
+
+The game runs without a database. Set `DATABASE_URL` to a Postgres connection string and every finished game is recorded in a `matches` table (created automatically on start), and a leaderboard appears in the lobby. Live state (lobby, matches, timers) always stays in memory.
+
+```sh
+DATABASE_URL=postgres://user:pass@localhost:5432/dead_and_injured npm run dev:server
+```
+
+Set `DATABASE_SSL=true` if your host requires TLS (for example an external Render connection string). Tests use PGlite, an in-memory Postgres, so they need no setup.
+
+Players aren't authenticated, so leaderboard entries are by display name (case-insensitive). That's fine for a casual game, but anyone can play under any name. Real accounts would be the next step if that matters.
+
+A database problem never interrupts a game: failed writes are logged and the leaderboard endpoint returns 503.
+
 ## Production
 
 ```sh
@@ -50,7 +66,7 @@ npm start          # serves the client and the socket server on $PORT (default 3
 
 ## Deploying to Render
 
-The repo includes a [render.yaml](render.yaml) blueprint: create a new Blueprint on Render pointing at this repo.
+The repo includes a [render.yaml](render.yaml) blueprint: create a new Blueprint on Render pointing at this repo. It also provisions a free Postgres database and wires up `DATABASE_URL`; delete the `databases` block and the `DATABASE_URL` env var to deploy without one. Check Render's current terms for how long free databases last.
 
 The game keeps lobby and match state in memory, so run **a single instance**, and note that a restart or redeploy ends active games. It needs a host that supports long-lived WebSocket connections (so not serverless platforms such as Vercel). On Render's free tier the service sleeps after a period of inactivity, and the first visit afterwards is slow.
 

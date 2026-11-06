@@ -9,5 +9,5 @@
     "skipLibCheck": true
   },
   "include": ["server", "shared"],
-  "exclude": ["**/*.test.ts"]
+  "exclude": ["**/*.test.ts", "server/testStore.ts"]
 }

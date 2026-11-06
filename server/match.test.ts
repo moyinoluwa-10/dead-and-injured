@@ -99,3 +99,33 @@ test("a guess restarts the clock for the next player", () => {
   assert.equal(m.currentTurn, second);
   assert.equal(m.turnMsLeft(), 5_000);
 });
+
+test("onFinish reports the result once per finished game", () => {
+  const results: unknown[] = [];
+  const m = new Match("m", ["a", "b"], { turnMs: 5_000, onFinish: (r) => results.push(r) });
+  m.ready("a", "1234");
+  m.ready("b", "5678");
+  const { first, second } = whoseTurn(m);
+  m.guess(first, "9021");
+  m.guess(second, "9021");
+  m.guess(first, secretOf(second));
+  assert.deepEqual(results, [
+    { winnerId: first, loserId: second, reason: "solved", winnerGuesses: 2, loserGuesses: 1 },
+  ]);
+
+  // a timeout reports the forfeiting player as the loser
+  m.requestRematch(first);
+  m.requestRematch(second);
+  m.ready("a", "1234");
+  m.ready("b", "5678");
+  const turn = m.currentTurn!;
+  m.expireTurn();
+  assert.equal(results.length, 2);
+  assert.deepEqual(results[1], {
+    winnerId: m.other(turn),
+    loserId: turn,
+    reason: "timeout",
+    winnerGuesses: 0,
+    loserGuesses: 0,
+  });
+});

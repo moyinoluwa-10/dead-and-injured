@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Leaderboard } from "./Leaderboard";
 import { ROOM_CODE_LENGTH, type PlayerInfo, type PlayerStatus } from "../../../shared/protocol";
 
 interface Props {
@@ -157,6 +158,8 @@ export function Lobby({
           </ul>
         )}
       </div>
+
+      <Leaderboard />
     </section>
   );
 }

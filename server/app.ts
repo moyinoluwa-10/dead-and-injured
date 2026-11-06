@@ -11,7 +11,8 @@ import type {
 } from "../shared/protocol";
 import { ROOM_CODE_LENGTH } from "../shared/protocol";
 import { Solver } from "../shared/solver";
-import { Match } from "./match";
+import { Match, type RoundResult } from "./match";
+import type { Store } from "./store";
 import {
   authSchema,
   digitsSchema,
@@ -32,6 +33,8 @@ export interface ServerOptions {
   /** Max events per socket in any 10 second window. */
   maxEventsPerWindow: number;
   clientDir: string;
+  /** Where finished games are recorded. Without one the game works, but has no leaderboard. */
+  store?: Store;
 }
 
 export const defaultOptions: ServerOptions = {
@@ -88,6 +91,16 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
   app.disable("x-powered-by");
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
+  });
+  app.get("/api/leaderboard", async (_req, res) => {
+    if (!opts.store) return void res.json({ enabled: false, leaders: [] });
+    try {
+      res.set("Cache-Control", "public, max-age=10");
+      res.json({ enabled: true, leaders: await opts.store.leaderboard(20) });
+    } catch (err) {
+      console.error("leaderboard query failed", err);
+      res.status(503).json({ error: "Leaderboard unavailable" });
+    }
   });
   app.use(express.static(opts.clientDir));
 
@@ -186,8 +199,27 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     maybeBotMove(match);
   }
 
+  const nameOf = (id: string) => players.get(id)?.username ?? "Computer";
+
+  /** Fire and forget: a database problem must never interrupt a game. */
+  function recordRound(r: RoundResult, vsComputer: boolean) {
+    opts.store
+      ?.recordRound({
+        winner: nameOf(r.winnerId),
+        loser: nameOf(r.loserId),
+        reason: r.reason,
+        winnerGuesses: r.winnerGuesses,
+        loserGuesses: r.loserGuesses,
+        vsComputer,
+      })
+      .catch((err) => console.error("failed to record game", err));
+  }
+
   function startMatch(a: Player, b: Player | Bot) {
-    const match = new Match(String(nextMatchId++), [a.id, b.id], { turnMs: opts.turnMs });
+    const match = new Match(String(nextMatchId++), [a.id, b.id], {
+      turnMs: opts.turnMs,
+      onFinish: (r) => recordRound(r, bots.has(match.id)),
+    });
     matches.set(match.id, match);
     a.matchId = match.id;
     if ("socketId" in b) b.matchId = match.id;

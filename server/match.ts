@@ -1,10 +1,21 @@
 import { NUMBER_LENGTH, isValidNumber, scoreGuess } from "../shared/game";
 import type { GameView, GuessResult, Phase } from "../shared/protocol";
 
+/** What happened in a finished game. */
+export interface RoundResult {
+  winnerId: string;
+  loserId: string;
+  reason: "solved" | "timeout";
+  winnerGuesses: number;
+  loserGuesses: number;
+}
+
 export interface MatchOptions {
   /** How long a player has to make each guess. */
   turnMs: number;
   now?: () => number;
+  /** Called once each time a game finishes. */
+  onFinish?: (result: RoundResult) => void;
 }
 
 export interface ViewExtras {
@@ -141,6 +152,15 @@ export class Match {
     this.turn = null;
     this.turnEndsAt = null;
     this.wins.set(winnerId, this.wins.get(winnerId)! + 1);
+
+    const loserId = this.other(winnerId);
+    this.opts.onFinish?.({
+      winnerId,
+      loserId,
+      reason,
+      winnerGuesses: this.guesses.get(winnerId)!.length,
+      loserGuesses: this.guesses.get(loserId)!.length,
+    });
   }
 
   private resetRound() {

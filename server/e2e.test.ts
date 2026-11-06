@@ -11,6 +11,7 @@ import type {
   ServerToClientEvents,
 } from "../shared/protocol";
 import { createGameServer, type ServerOptions } from "./app";
+import { createMemoryStore } from "./testStore";
 
 type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
@@ -372,5 +373,67 @@ describe("game server", () => {
 
     const again = await connect("alice", a.token);
     assert.equal(again.resumed, true);
+  });
+
+  test("finished games are recorded and served on the leaderboard", async () => {
+    const store = await createMemoryStore();
+    await start({ store });
+
+    const empty = await (await fetch(`${url}/api/leaderboard`)).json();
+    assert.deepEqual(empty, { enabled: true, leaders: [] });
+
+    const { a, b } = await pair();
+    const { first, second, secretOf } = await readyUp(a, b);
+    first.socket.emit("game:guess", secretOf(second));
+    await waitFor(() => first.state!.phase === "finished", "game over");
+
+    let board: { leaders: { username: string; wins: number; losses: number }[] } = { leaders: [] };
+    for (let i = 0; i < 50 && board.leaders.length === 0; i++) {
+      await sleep(20);
+      board = await (await fetch(`${url}/api/leaderboard`)).json();
+    }
+    const winnerName = first === a ? "alice" : "bob";
+    const loserName = first === a ? "bob" : "alice";
+    assert.equal(board.leaders[0].username, winnerName);
+    assert.equal(board.leaders[0].wins, 1);
+    assert.equal(board.leaders[1].username, loserName);
+    assert.equal(board.leaders[1].losses, 1);
+    await store.close();
+  });
+
+  test("games against the computer are not recorded", async () => {
+    const store = await createMemoryStore();
+    await start({ store, turnMs: 150 });
+    const me = await connect("solo");
+    me.socket.emit("bot:start");
+    await waitFor(() => me.state !== null, "bot game");
+    me.socket.emit("game:ready", "0123");
+    await waitFor(() => me.state!.phase === "finished", "timeout or bot win", 5000);
+    await sleep(100);
+    assert.deepEqual(await store.leaderboard(10), []);
+    await store.close();
+  });
+
+  test("without a database the leaderboard is disabled but the game works", async () => {
+    await start();
+    assert.deepEqual(await (await fetch(`${url}/api/leaderboard`)).json(), { enabled: false, leaders: [] });
+  });
+
+  test("a failing database never interrupts a game", async () => {
+    const store = await createMemoryStore();
+    store.recordRound = async () => {
+      throw new Error("db down");
+    };
+    store.leaderboard = async () => {
+      throw new Error("db down");
+    };
+    await start({ store });
+    const { a, b } = await pair();
+    const { first, second, secretOf } = await readyUp(a, b);
+    first.socket.emit("game:guess", secretOf(second));
+    await waitFor(() => second.state!.phase === "finished", "game still finishes");
+    const res = await fetch(`${url}/api/leaderboard`);
+    assert.equal(res.status, 503);
+    await store.close();
   });
 });
