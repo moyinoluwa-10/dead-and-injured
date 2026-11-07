@@ -49,6 +49,7 @@ describe("game server", () => {
       turnMs: 5_000,
       reconnectGraceMs: 5_000,
       botDelayMs: [5, 15],
+      log: () => {},
       ...opts,
     });
     await new Promise<void>((r) => game.server.listen(0, r));

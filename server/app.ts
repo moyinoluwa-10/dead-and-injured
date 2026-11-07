@@ -12,7 +12,7 @@ import type {
 import { MAX_USERNAME_LENGTH, ROOM_CODE_LENGTH } from "../shared/protocol";
 import { Solver } from "../shared/solver";
 import { Match, type RoundResult } from "./match";
-import { isPrivateAddress, safely, uniqueName } from "./safety";
+import { describeClient, isPrivateAddress, safely, uniqueName } from "./safety";
 import type { Store } from "./store";
 import {
   authSchema,
@@ -45,6 +45,8 @@ export interface ServerOptions {
   /** Max events per socket in any 10 second window. */
   maxEventsPerWindow: number;
   clientDir: string;
+  /** Receives connection diagnostics (connects, disconnect reasons, refused handshakes). */
+  log: (message: string) => void;
   /** Where finished games are recorded. Without one the game works, but has no leaderboard. */
   store?: Store;
 }
@@ -58,7 +60,16 @@ export const defaultOptions: ServerOptions = {
   maxConnectionsPerIp: 10,
   maxEventsPerWindow: 80,
   clientDir: path.resolve(process.cwd(), "client/dist"),
+  log: (message) => console.log(message),
 };
+
+/**
+ * How long idle HTTP connections are kept open. Node's default (5s) is shorter than a
+ * hosting proxy's idle timeout, so the proxy can reuse a connection Node has just closed,
+ * which fails the request (and a POST isn't retried). Keep this comfortably longer than
+ * the proxy's timeout; headersTimeout must exceed it.
+ */
+const KEEP_ALIVE_TIMEOUT_MS = 120_000;
 
 interface SocketData {
   username: string;
@@ -105,6 +116,15 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     Record<string, never>,
     SocketData
   >(server, { maxHttpBufferSize: 10_000 });
+
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+  server.headersTimeout = KEEP_ALIVE_TIMEOUT_MS + 1_000;
+
+  // Handshakes Socket.io turned away before a connection existed, e.g. "Session ID unknown".
+  io.engine.on("connection_error", (err: { code?: number; message?: string; req?: http.IncomingMessage }) => {
+    const client = describeClient(err.req?.headers["user-agent"]);
+    opts.log(`handshake refused: ${client}, code=${err.code}, "${err.message}"`);
+  });
 
   app.disable("x-powered-by");
   app.get("/health", (_req, res) => {
@@ -388,6 +408,13 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
   io.on("connection", (socket) => {
     const { username: requestedName, token, ip } = socket.data;
 
+    const client = describeClient(socket.handshake.headers["user-agent"]);
+    const connectedAt = Date.now();
+    socket.on("disconnect", (reason) => {
+      const seconds = Math.round((Date.now() - connectedAt) / 1000);
+      opts.log(`disconnect: ${client}, reason="${reason}", after ${seconds}s`);
+    });
+
     if (ip) {
       connectionsByIp.set(ip, (connectionsByIp.get(ip) ?? 0) + 1);
       socket.on("disconnect", () => {
@@ -449,6 +476,9 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
     const self = me;
     socket.join(self.id);
     socket.emit("session:hello", { playerId: self.id, username: self.username, resumed });
+    opts.log(
+      `connect: ${client} via ${socket.conn.transport.name}, ${resumed ? "resumed session" : "new session"}, ${players.size} players`
+    );
 
     // Handlers that throw are logged and reported to the player instead of taking the server down.
     const on = <E extends keyof ClientToServerEvents>(event: E, handler: ClientToServerEvents[E]) => {

@@ -22,6 +22,37 @@ export function safely<A extends unknown[]>(
   };
 }
 
+/** A short label such as "iOS Safari" for logs. Deliberately coarse: no versions, nothing identifying. */
+export function describeClient(userAgent: string | undefined): string {
+  if (!userAgent) return "unknown client";
+  const os = /iPhone|iPad|iPod/i.test(userAgent)
+    ? "iOS"
+    : /Android/i.test(userAgent)
+      ? "Android"
+      : /Windows/i.test(userAgent)
+        ? "Windows"
+        : /Mac OS X|Macintosh/i.test(userAgent)
+          ? "macOS"
+          : /Linux/i.test(userAgent)
+            ? "Linux"
+            : /node|undici/i.test(userAgent)
+              ? "Node"
+              : "other OS";
+  // Order matters: Chrome and Edge identify as Safari too, and iOS browsers all say "Safari".
+  const browser = /CriOS/i.test(userAgent)
+    ? "Chrome"
+    : /FxiOS|Firefox/i.test(userAgent)
+      ? "Firefox"
+      : /EdgiOS|Edg\//i.test(userAgent)
+        ? "Edge"
+        : /Chrome/i.test(userAgent)
+          ? "Chrome"
+          : /Safari/i.test(userAgent)
+            ? "Safari"
+            : "";
+  return browser ? `${os} ${browser}` : os;
+}
+
 /** True for loopback and private-network addresses, which say nothing about who the real client is. */
 export function isPrivateAddress(address: string): boolean {
   const ip = address.replace(/^::ffff:/i, "").toLowerCase();
