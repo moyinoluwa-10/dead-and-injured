@@ -68,7 +68,9 @@ npm start          # serves the client and the socket server on $PORT (default 3
 
 The repo includes a [render.yaml](render.yaml) blueprint: create a new Blueprint on Render pointing at this repo. For the leaderboard, create a Postgres database in Render, then set the `DATABASE_URL` environment variable on the web service to the database's **internal** connection string (Blueprints prompt for it; otherwise use the service's Environment tab). Use the external string only when connecting from your own machine, together with `DATABASE_SSL=true`. Skip it to deploy without a database. Check Render's current terms for how long free databases last.
 
-The game keeps lobby and match state in memory, so run **a single instance**, and note that a restart or redeploy ends active games. It needs a host that supports long-lived WebSocket connections (so not serverless platforms such as Vercel). On Render's free tier the service sleeps after a period of inactivity, and the first visit afterwards is slow.
+The game keeps lobby and match state in memory, so run **a single instance**, and note that a restart or redeploy ends active games. It needs a host that supports long-lived WebSocket connections (so not serverless platforms such as Vercel). On Render's free tier the service sleeps after a period of inactivity, and the first visit afterwards is slow: while it wakes (up to about a minute) the app shows a "Connecting…" message and connects by itself once the server is back. A paid instance avoids this entirely.
+
+The client connects over WebSocket first and falls back to HTTP long-polling only if WebSockets are blocked. It also re-checks the connection whenever the page returns to the foreground, because mobile browsers (iOS Safari especially) silently drop connections while a page is in the background.
 
 ## Server limits
 

@@ -41,6 +41,8 @@ export interface GameView {
 }
 
 export interface ClientToServerEvents {
+  /** Liveness check: the server answers by calling `ack`. */
+  "session:ping": (ack: () => void) => void;
   "challenge:send": (targetId: string) => void;
   "challenge:respond": (fromId: string, accept: boolean) => void;
   "challenge:cancel": () => void;

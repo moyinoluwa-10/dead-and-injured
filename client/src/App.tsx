@@ -56,6 +56,18 @@ function Session({
   const everConnected = useRef(false);
   if (connected) everConnected.current = true;
 
+  // On a free host the server sleeps when idle and can take up to a minute to wake.
+  // After a few seconds without a connection, say so instead of leaving a blank screen.
+  const [slowConnect, setSlowConnect] = useState(false);
+  useEffect(() => {
+    if (connected) {
+      setSlowConnect(false);
+      return;
+    }
+    const timer = setTimeout(() => setSlowConnect(true), 6000);
+    return () => clearTimeout(timer);
+  }, [connected]);
+
   useTurnAlerts(game?.yourTurn ?? false, muted);
 
   useEffect(() => {
@@ -137,6 +149,7 @@ function Session({
           className="mb-4 rounded-lg bg-rose-500/10 px-4 py-2 text-center text-sm text-rose-300"
         >
           Connection lost. Reconnecting…
+          {slowConnect && " The server may be waking up, which can take up to a minute."}
         </p>
       )}
 
@@ -162,9 +175,15 @@ function Session({
             </button>
           </div>
         ) : !connected && !everConnected.current ? (
-          <p className="mt-16 text-center text-slate-400">
-            Connecting to the server…
-          </p>
+          <div role="status" className="mx-auto mt-16 max-w-sm space-y-2 text-center text-slate-400">
+            <p>Connecting to the server…</p>
+            {slowConnect && (
+              <p className="text-sm text-slate-500">
+                This is taking a while. The server may be waking up after a quiet period, which can take
+                up to a minute. It will connect by itself.
+              </p>
+            )}
+          </div>
         ) : (
           <Lobby
             players={others}

@@ -539,6 +539,34 @@ describe("game server", () => {
     assert.ok(longer.name.endsWith(" (2)"));
   });
 
+  test("session:ping is answered, and a dead connection can be detected", async () => {
+    await start();
+    const a = await connect("alice");
+    const reply = await a.socket.timeout(2000).emitWithAck("session:ping");
+    assert.equal(reply, undefined); // the ack carries no payload; getting one proves the server is alive
+
+    // a client that is gone gets no answer, which is how the browser notices
+    await game.close();
+    await assert.rejects(() => a.socket.timeout(300).emitWithAck("session:ping"));
+  });
+
+  test("a client can connect over WebSocket alone and over polling alone", async () => {
+    await start();
+    for (const transports of [["websocket"], ["polling"]] as const) {
+      const s = io(url, {
+        auth: { username: `via-${transports[0]}`, token: crypto.randomUUID() },
+        transports: [...transports],
+        reconnection: false,
+      });
+      const hello = await new Promise<string>((resolve, reject) => {
+        s.on("session:hello", (h) => resolve(h.username));
+        s.on("connect_error", reject);
+      });
+      assert.equal(hello, `via-${transports[0]}`);
+      s.close();
+    }
+  });
+
   test("limits connections per client address", async () => {
     await start({ maxConnectionsPerIp: 2, clientIpHeader: "x-test-ip" });
     const open = (ip: string) =>

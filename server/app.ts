@@ -516,6 +516,10 @@ export function createGameServer(overrides: Partial<ServerOptions> = {}) {
       startMatch(challenger, self);
     });
 
+    on("session:ping", (ack) => {
+      if (typeof ack === "function") ack();
+    });
+
     on("room:create", () => {
       if (!isAvailable(self)) return socket.emit("error", "Finish what you're doing first");
       self.roomCode = newRoomCode();

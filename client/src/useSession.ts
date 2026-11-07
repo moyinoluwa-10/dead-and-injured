@@ -49,7 +49,14 @@ export function useSession(username: string) {
   const [refused, setRefused] = useState<string | null>(null);
 
   useEffect(() => {
-    const socket: GameSocket = io({ auth: { username, token: sessionToken() } });
+    const socket: GameSocket = io({
+      auth: { username, token: sessionToken() },
+      // Go straight to WebSocket. The default starts with HTTP long-polling, whose POST
+      // requests are what fail ("xhr post error") on flaky mobile connections and when
+      // the server is waking up. Polling stays as a fallback for networks that block WebSockets.
+      transports: ["websocket", "polling"],
+      tryAllTransports: true,
+    });
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -61,8 +68,27 @@ export function useSession(username: string) {
     socket.on("connect_error", (err) => {
       // When the server refuses a connection outright the client does not retry by itself.
       if (!socket.active) setRefused(err.message);
-      else setNotice(err.message);
+      // Otherwise it keeps retrying. The "connecting" and "reconnecting" messages cover
+      // that, and a raw transport error ("xhr poll error") means nothing to a player.
+      else console.warn("connection attempt failed, retrying:", err.message);
     });
+
+    // Mobile browsers freeze pages in the background and can silently drop their
+    // connections, leaving a socket that looks open but is dead. When the page comes
+    // back, reconnect if needed, and otherwise check the connection really is alive.
+    const checkConnection = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!socket.connected) {
+        socket.connect();
+        return;
+      }
+      socket.timeout(4000).emit("session:ping", (err: Error | null) => {
+        if (err) socket.io.engine?.close();
+      });
+    };
+    document.addEventListener("visibilitychange", checkConnection);
+    window.addEventListener("online", checkConnection);
+    window.addEventListener("pageshow", checkConnection);
 
     socket.on("session:hello", ({ playerId, username: assignedName, resumed }) => {
       setMyId(playerId);
@@ -96,6 +122,9 @@ export function useSession(username: string) {
     socket.on("error", setNotice);
 
     return () => {
+      document.removeEventListener("visibilitychange", checkConnection);
+      window.removeEventListener("online", checkConnection);
+      window.removeEventListener("pageshow", checkConnection);
       socket.disconnect();
       socketRef.current = null;
     };
